@@ -1,0 +1,701 @@
+---
+title: "DataScienceFinal MEGASHEET"
+author: "Colin Petersen"
+date: "4/12/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##    Preliminary data cleaning/inspection/exploration
+
+```{r}
+set.seed(0)
+#Load CSV data:
+df.train <-read.csv(file="train.csv", header=TRUE)
+df.test <-read.csv(file="test.csv", header=TRUE)
+#make zipcode and basement into a factor variable:
+df.train$zipcode <- as.factor(df.train$zipcode)
+df.test$zipcode <-as.factor(df.test$zipcode)
+df.train$basement <- as.factor(df.train$basement)
+df.test$basement <- as.factor(df.test$basement)
+View(df.train)
+View(df.test)
+#check for missing values in fireplaces
+length(which(is.na(df.train$fireplaces)))
+length(which(is.na(df.test$fireplaces)))
+#remove the fireplaces variable altogether from training and test:
+df.train <- df.train[,-12]
+df.test <- df.test[,-12]
+#check for any other NA values:
+dim(df.train); dim(df.train[complete.cases(df.train),])
+library(dplyr)
+#returns how many DISTINCT entries there are for each categorical
+#predictor variable in the training set.
+length(unique(df.train$zipcode))
+length(unique(df.train$desc))
+length(unique(df.train$exteriorfinish))
+length(unique(df.train$rooftype))
+length(unique(df.train$state))
+#data is largely at a level we can play with, except for issues
+#With categorical levels that we will address later.
+zipcodeinvestigation <- df.train %>%
+  group_by(zipcode) %>%
+  arrange(zipcode) %>%
+  summarise(n = n())%>%
+  arrange(n)
+head(zipcodeinvestigation)
+plot(df.train$price)
+#Zipcodes will be an issue. THere's a ton of factor levels
+#for which n is less than 10, which can lead to some serious overfitting.
+```
+
+##    Playing w differences between df.train and df.test
+
+```{r}
+#take just numeric predictor variables of df.train
+df.numeric <- df.train[,-2] %>%
+  select(where(is.numeric))
+means.train <- as.data.frame(lapply(df.numeric, mean))
+#now compare means to numeric variables of df.test
+df.numerictest <- df.test %>%
+  select(where(is.numeric))
+means.test <- as.data.frame(lapply(df.numerictest, mean))
+means.diff <- means.train-means.test; means.diff
+#these numbers seem relatively reasonable, except for lotarea... It seems that
+#the mean lot area of df.train is much larger than that of df.test!
+#On second inspection though, it seems that a few large observations of
+#lotarea are skewing this, so not really a huge deal in the
+#long run. Not worth editing the data or removing lotarea over!
+lapply(df.numeric, min)
+#all of these minimum values seem possible.
+```
+
+##    testing the importance of zipcode
+
+```{r}
+set.seed(0)
+# ~70/30 train/test split! Remove ID for convenience
+#must ensure that 70/30 train/test split is at each level of zipcode!
+#remove zipcode 15031 as it onlt has one observation.
+df.train <- df.train[-which(df.train$zipcode==15031),]
+#next, sample train and test sets by level of zipcode.
+distinctZip <- as.data.frame(unique(df.train$zipcode))
+nDistinctZip <- nrow(distinctZip)
+#now we have the distinct zips!
+train <- list()
+for(i in 1:nDistinctZip){
+  zip <- paste(distinctZip[i,])
+  rowsatzip <- which(df.train$zipcode==zip)
+  #train[[i]] is now a random sample of 70% of the observations
+  #at a given distinct zip level! Unless that zipcode only
+  #has 9 or less observations, in which case train[[i]] is rs of
+  #50% of observations at that distinct zip level.
+  if(length(rowsatzip) < 9){
+    train[[i]] <- sample(rowsatzip, size=(.5*length(rowsatzip)))
+  } else {
+    train[[i]] <- sample(rowsatzip, size=(.7*length(rowsatzip)))
+  }
+}
+train <- unlist(train)
+trainSet <- df.train[train,-1]
+testSet <- df.train[-train,-1]
+```  
+
+##    Permutation test for zipcode importance
+```{r}
+#perform permutation test to determine the importance of zipcode in a model containing
+#AvgIncome and state.
+set.seed(0)
+#test first a full model w no permutation
+lm.simplelinear <- lm(price~AvgIncome+state+zipcode, data=trainSet)
+lm.pred <- predict(lm.simplelinear, testSet)
+mse0 <- mean((testSet$price-lm.pred)^2)
+summary(lm.simplelinear)
+library(bootstrap)
+nPerm <- 1000
+MSE.perm <- rep(0,nPerm)
+for (i in 1:nPerm) {
+  trainSetPerm <- trainSet
+  newzips <- sample(trainSet$zipcode)
+  trainSetPerm$zipcode <- newzips
+  lm <- lm(price~AvgIncome+state+zipcode, data=trainSetPerm)
+  lm.pred <- predict(lm, testSet)
+  MSE.perm[i] <- mean((testSet$price-lm.pred)^2)
+}
+summary(lm.simplelinear)
+quantile(MSE.perm, probs=0.05)
+mse0
+#unfortunately, zip seems to be significant!
+#but wait... tons of the zipcode coefficients are insignificant
+#Even though the overall effect of adding zipcode significant!
+#Huge collinearity issue. Additionally, two zipcodes exhibit PERFECT 
+#MULTICOLINEARITY!
+alias(lm.simplelinear)
+#Alias function proves perfect multicolinearity in some zip codes, even with just 
+#AvgIncome and state!
+``` 
+
+##    Further investigation: what variables can we scrap right out? What do we see?
+
+```{r}
+library(regclass)
+#we have df.numeric which is a matrix with ONLY the numeric predictors. let's do
+#Simple linear regression
+df.numeric <- df.train %>%
+  select(where(is.numeric))
+cor(df.numeric)
+#price seems to be HIGHLY correlated with sqft, bathrooms, and moderately
+#correlated with totalrooms and bedrooms.
+#yearbuilt seems like it's not a factor at all. 
+#variables with problematically high linear correlation:
+#totalrooms and bedrooms, bathrooms, sqft
+#sqft, bedrooms, and bathrooms all have a little correlation w eachother
+#totalrooms is the problematic one based on intuition, no reason to keep
+#when sqft bedrooms and bathrooms are already in place.
+lm.numeric <- lm(price~., data=df.numeric)
+summary(lm.numeric)
+VIF(lm.numeric)
+#we have some problematic VIF issues here, which can lead to
+#colinearity problems and overall accuracy issues. Let's try and test the
+#VIF without totalrooms (which has shown high linear correlation problems)
+VIF(lm(price~numstories+yearbuilt+bedrooms+bathrooms+sqft+lotarea+AvgIncome, data=df.numeric))
+#bathrooms and sqft are still problematically high, but I choose to leave them in.
+#I don't want to lose any more of that sweet sweet signal.
+```
+
+
+
+
+##    Final cleaning: remove zipcode and totalrooms from df.train and df.test, new trainSet testSet. Remove mobilehome/concrete observation value from both datasets.
+
+```{r}
+set.seed(0)
+df.train <- df.train[-which(df.train$desc=="MOBILE HOME"),]
+df.test <- df.test[-which(df.test$desc=="MOBILE HOME"),]
+df.train <- df.train[-which(df.train$exteriorfinish=="Concrete"),]
+df.test <- df.test[-which(df.test$exteriorfinish=="Concrete"),]
+df.train <- df.train[,-c(9,15)]
+df.test <- df.test[,-c(9,15)]
+train <- sample(1:nrow(df.train), size=(0.7*nrow(df.train)))
+trainSet <- df.train[train,-1]#removes ID
+testSet <- df.train[-train,-1]
+```
+
+##    Model 1: simple linear regression with all predictors (baseline model)
+
+```{r}
+set.seed(0)
+lm.simplelinear <- lm(price~., data=trainSet)
+lm.pred <- predict(lm.simplelinear, testSet)
+summary(lm.simplelinear)
+mse0 <- mean((testSet$price-lm.pred)^2); mse0
+#very high adjusted R^2.... This means that high df models perform well!
+```
+
+##    Model 2: simple linear regression using BSS
+
+```{r}
+set.seed(0)
+library(leaps)
+p <- (ncol(trainSet)-1)
+lm.bss <- regsubsets(price~., data=trainSet, nvmax=p)
+#
+summary.bss <- summary(lm.bss)
+#what model size has the lowest mallows CP?
+which(summary.bss$cp==min(summary.bss$cp))
+#the lowest MSE is at model #12. What variables are included in model #12?
+modelsteps <- summary.bss$which
+modelsteps <- modelsteps[,-1] #takes out the intercept
+#Here's the model with the lowest mallows CP:
+significantbss <- modelsteps[12,]
+#Only display significant variables:
+which(significantbss==TRUE)
+#now that we know what's significant, it's time to redefine a training and test
+#set with ONLY THE VARIABLES THAT ARE SIGNIFICANT! We will have to
+#make new variables to do this.
+#first, split categorical variables into only the relevant categories:
+MultiFamily <- rep(FALSE, times=nrow(df.train))
+ShingleRoof <- rep(FALSE, times=nrow(df.train))
+SlateRoof <- rep(FALSE, times=nrow(df.train))
+FrameFinish <- rep(FALSE, times=nrow(df.train))
+StoneFinish <- rep(FALSE, times=nrow(df.train))
+StuccoFinish <- rep(FALSE, times=nrow(df.train))
+df.train2 <- cbind(df.train, MultiFamily, ShingleRoof, SlateRoof, FrameFinish, StoneFinish, StuccoFinish)
+df.train2[which(df.train2$desc=="MULTI-FAMILY"),]$MultiFamily = TRUE
+df.train2[which(df.train2$rooftype=="SHINGLE"),]$ShingleRoof = TRUE
+df.train2[which(df.train2$rooftype=="SLATE"),]$SlateRoof = TRUE
+df.train2[which(df.train2$exteriorfinish=="Frame"),]$FrameFinish = TRUE
+df.train2[which(df.train2$exteriorfinish=="Stone"),]$StoneFinish = TRUE
+df.train2[which(df.train2$exteriorfinish=="Stucco"),]$StuccoFinish = TRUE
+df.train2 <- df.train2[,-c(1,3, 4, 5, 6, 7, 8)]
+#Whew! Now we have df.train2, which is df.train only containing the variables chosen
+#By best subset selection. Now let's make a new training and test set using the same
+#train sample defined previously, but a new set of variables!
+trainSetBSS <- df.train2[train,]
+testSetBSS <- df.train2[-train,]
+#cool. we can use these in the future if we want to.
+lm.bss.final <- lm(price~., data=trainSetBSS)
+lm.pred <- predict(lm.bss.final, testSetBSS)
+mse1 <- mean((testSetBSS$price-lm.pred)^2)
+mse0; mse1
+summary(lm.bss.final)
+#as you can see, the mse using bss is slightly more.
+```
+
+
+##    Ridge 
+
+```{r}
+set.seed(0)
+library(glmnet)
+grid=10^seq(10, -5, length=1000)
+x <- model.matrix(price~., trainSet)[,-1]
+y <- trainSet$price
+ridge.mod <- glmnet(x, y, alpha=0, lambda=grid)
+xtest <- model.matrix(price~., testSet)[,-1]
+ytest <- testSet$price
+#Now, do cross-validation (10-fold default CV):
+cv.out <- cv.glmnet(x, y, alpha=0)
+plot(cv.out)
+bestlam=cv.out$lambda.min
+ridge.pred <- predict(ridge.mod, s=bestlam, xtest)
+mse2<- mean((ytest-ridge.pred)^2) ;mse2
+#good mse!
+```
+
+##    LASSO  
+
+```{r}
+set.seed(0)
+lasso.mod <- glmnet(x, y, alpha=1, lambda=grid)#grid is the same as grid from ridge
+cv.out <- cv.glmnet(x, y, alpha=1)
+plot(cv.out)
+bestlam=cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s=bestlam, newx=xtest)
+outt=glmnet(x,y,alpha=1,lambda=bestlam)
+predict(outt,type="coefficients")
+mse3 <- mean((ytest-lasso.pred)^2); mse3
+#higher than the MSE of ridge! 
+#only 1 coeff reduced to zero
+```
+
+##    ridge on bss variables
+
+```{r}
+set.seed(0)
+x <- model.matrix(price~., trainSetBSS)[,-1]
+y <- trainSetBSS$price
+ridge.mod <- glmnet(x, y, alpha=0, lambda=grid)
+xtest <- model.matrix(price~., testSetBSS)[,-1]
+ytest <- testSetBSS$price
+#Now, do cross-validation:
+cv.out <- cv.glmnet(x, y, alpha=0)
+plot(cv.out)
+bestlam=cv.out$lambda.min
+ridge.pred <- predict(ridge.mod, s=bestlam, xtest)
+mse4 <- mean((ytest-ridge.pred)^2); mse4
+```
+
+##    LASSO on bss variables
+
+```{r}
+set.seed(0)
+lasso.mod <- glmnet(x, y, alpha=1, lambda=grid)
+cv.out <- cv.glmnet(x, y, alpha=1)
+plot(cv.out)
+bestlam=cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s=bestlam, newx=xtest)
+outt=glmnet(x,y,alpha=1,lambda=bestlam)
+predict(outt,type="coefficients")
+mse5 <- mean((ytest-lasso.pred)^2); mse5
+```
+
+
+##    Principal Components Regression using CV
+
+```{r}
+library(pls)
+set.seed(0)
+#Can't do scaling=TRUE because of categorical predictors.
+#oh well! Hope it doesn't affect the results too much
+pcr.fit <- pcr(price~., data=trainSet, validation="CV")
+summary(pcr.fit)
+validationplot(pcr.fit, val.type="MSEP")
+#17 is a good ncomp bc it minimizes adjCV
+pcr.pred <- predict(pcr.fit, testSet, ncomp=17)
+mse6 <- mean((pcr.pred-testSet$price)^2); mse6
+```
+
+##    PLS Regression
+
+```{r}
+set.seed(0)
+pls.fit <- plsr(price~., data=trainSet, validation="CV", estimate="test", newdata=testSet)
+summary(pls.fit)
+validationplot(pls.fit, val.type="MSEP", estimate="test", newdata=testSet)
+#Highest % variance explained appears at M=13, after that it doesn't improve much at all so
+#ncomp=13 is the best
+pls.pred <- predict(pls.fit, testSet, ncomp=13)
+mse7 <- mean((pls.pred-testSet$price)^2); mse7
+```
+
+##    Polynomial Regression
+
+```{r}
+set.seed(0)
+library(caret)
+library(boot)
+#first, let's inspect what variables may have a polynomial relationship with price
+#bathrooms and sqft are looking a little like that by inspection!
+#avgincome and bedrooms will be included as well
+plot(df.train$bathrooms, df.train$price)
+plot(df.train$sqft, df.train$price)
+#verify which polynomial fit works best with each variable using training RMSE as a measure
+#of the polynomial term
+RMSEs <- c(1:5)
+train.control <- trainControl(method="repeatedcv", number = 10, repeats=15)
+#repeated 10 fold CV for degree=1 to 5
+for(i in 1:5){
+  #This formula is just a way to make sure the train() function can
+  #recognize "i" as a number
+  formulatouse <- as.formula(paste0("price~poly(bathrooms, ", i, ")"))
+  fits.lm <- train(form=formulatouse, data=trainSet, method="lm",
+                   trControl=train.control)
+RMSEs[i] <- fits.lm$results[[2]] #this fits.lm$results[[2]] is the RMSE of the model
+}
+bestDegreeBathrooms <- which(RMSEs==min(RMSEs))
+#now, do best degree for sqft!
+for(i in 1:5){
+  formulatouse <- as.formula(paste0("price~poly(sqft, ", i, ")"))
+  fits.lm <- train(form=formulatouse, data=trainSet, method="lm",
+                   trControl=train.control)
+RMSEs[i] <- fits.lm$results[[2]]
+}
+bestDegreeSqft <- which(RMSEs==min(RMSEs))
+#now do best degree for AvgIncome!
+for(i in 1:5){
+  formulatouse <- as.formula(paste0("price~poly(AvgIncome, ", i, ")"))
+  fits.lm <- train(form=formulatouse, data=trainSet, method="lm",
+                   trControl=train.control)
+RMSEs[i] <- fits.lm$results[[2]]
+}
+bestDegreeAvgIncome <- which(RMSEs==min(RMSEs))
+#now do best degree for bedrooms!
+for(i in 1:5){
+  formulatouse <- as.formula(paste0("price~poly(bedrooms, ", i, ")"))
+  fits.lm <- train(form=formulatouse, data=trainSet, method="lm",
+                   trControl=train.control)
+RMSEs[i] <- fits.lm$results[[2]]
+}
+bestDegreeBedrooms <- which(RMSEs==min(RMSEs))
+lm.poly <- lm(price~desc+exteriorfinish+rooftype+lotarea+state+poly(bathrooms, bestDegreeBathrooms)+poly(sqft, bestDegreeSqft)+poly(AvgIncome, bestDegreeAvgIncome)+poly(bedrooms, bestDegreeBedrooms), data=trainSet)
+lm.pred <- predict(lm.poly, testSet)
+mse8 <- mean((lm.pred-testSet$price)^2); mse8
+summary(lm.poly)
+``` 
+
+##    Splines
+
+```{r, message=FALSE, warning=FALSE}
+library(splines)
+library(boot)
+set.seed(0)
+CVerrors = c(1:20)#ten fold CV for 3-20 df
+for (i in 3:20){
+    lm.fit = glm(price~desc+rooftype+state+bs(bedrooms, df=i)+bs(bathrooms, df=i)+sqft+bs(lotarea, df=i)+bs(AvgIncome, df=i), data = trainSet)
+    CVerrors[i] = cv.glm(testSet, lm.fit, K=10)$delta[2]
+}
+CVerrors <- CVerrors[-c(1, 2)]; CVerrors #bc cverrors starts at 3
+plot(CVerrors)
+bestdf <- 2+which(CVerrors==min(CVerrors))#because cverrors start at 3, add 2
+lm.spline = glm(price~desc+rooftype+state+bs(bedrooms, df=bestdf)+bs(bathrooms, df=bestdf)+sqft+bs(lotarea, df=bestdf)+bs(AvgIncome, df=bestdf), data = trainSet)
+lm.pred <- predict(lm.spline, testSet)
+mse9 <- mean((testSet$price-lm.pred)^2); mse9
+#higher MSE, most likely due to the fact that splines suck
+summary(lm.spline)
+```
+
+##    GAMs
+
+```{r}
+library(gam)
+library(ggplot2)#I'm just going to use the default df=4.
+fit.gam <- gam(price~desc+exteriorfinish+rooftype+s(bedrooms)+s(bathrooms)+ s(sqft)+s(lotarea)+s(AvgIncome), data=trainSet)
+summary(fit.gam)
+gam.pred <- predict(fit.gam, testSet)
+mse10 <- mean((gam.pred-testSet$price)^2); mse10
+```
+
+##    Single Tree using CV
+
+```{r}
+set.seed(0)
+library(tree)
+tree.mod <- tree(price~., data=trainSet)
+summary(tree.mod)
+plot(tree.mod)
+text(tree.mod, pretty=0)
+tree.pred <- predict(tree.mod, testSet)
+mse11 <- mean((testSet$price-tree.pred)^2); mse11
+#full tree is built above, now time to prune
+cv.tree <- cv.tree(tree.mod, FUN=prune.tree)
+bestsize <- cv.tree$size[which(cv.tree$dev==min(cv.tree$dev))]
+prune.mod <- prune.tree(tree.mod, best=bestsize)
+plot(prune.mod)
+text(prune.mod,pretty=0)
+pred.prune <- predict(prune.mod, testSet)
+mean((testSet$price-pred.prune)^2)
+#Most pruned tree by cross validation is the same as the original tree!
+```
+
+##    Bagging
+
+```{r}
+library(randomForest)
+set.seed(0)
+p <- ncol(trainSet)-1
+#number of predictors p
+bag.mod <- randomForest(price~., data=trainSet, mtry=p, importance=TRUE, ntree=1000)
+#bagging, so mtry=p :)
+bag.mod
+bag.mod.pred <- predict(bag.mod, newdata=testSet)
+mse12 <- mean((bag.mod.pred-testSet$price)^2); mse12
+importance(bag.mod)
+``` 
+
+
+##   Random Forest with mtry chosen by cross-validation
+
+```{r}
+set.seed(0)
+MSElist <- c(1:p)
+for(i in 1:p){
+rf.mod <- randomForest(price~., data=trainSet, mtry=i, ntree=1000, importance=T)
+rf.pred <- predict(rf.mod, testSet)
+MSElist[i]<- mean((testSet$price-rf.pred)^2)
+}
+bestmtry<- which(MSElist==min(MSElist), arr.ind=TRUE); bestmtry
+#the best mtry=5.
+rf.mod <- randomForest(price~., data=trainSet, mtry=bestmtry, ntree=1000, importance=T)
+importance(rf.mod)
+rf.pred <- predict(rf.modOriginal, testSet)
+mse13 <- mean((testSet$price-rf.pred)^2); mse13
+```  
+
+
+##    Further playing and analysis to see if we can optimize anything!  
+
+AS of right now, we have everything important that we might need to have. There are 3 models that are particularly interesting. One is the polynomial model, as it is easily intepretable and the best parametric model, even if it underperforms compared to its nonparametric counterparts. The two lowest MSEs come from bagging and random forests, with random forests being the clear winner in MSE reduction. That being said, random forests have some serious interpretability issues.
+
+I want to cross-validate the models and test a few things:
+
+1. Do random forests trained on a different training set and test set identify different significant predictors?
+
+Sometimes yes, mostly no. The best models have sqft as v important
+
+2. Does bagging on a different train/test set identify different signficant predictors?
+
+Yes and no. Kinda, sorta, a little. It's complicated.
+
+3. Using the models built previously on the original training data, will the MSE be significantly worse if we test them on a new test set?
+
+For randomForest stuff, it actually isn't that different, but for bagging, it gets waaay worse for some reason. Weird!
+
+4. Which model do I go with??????
+
+Randomforests seem to be the best honestly. The one time in my analysis where it performs worse than the comparison model is a fluke where sqft isnt identified as that important.
+
+```{r}
+#question 1: bagging/RF with new train and test set with a 70/30 train/test split
+#and a new random seed of 3!
+set.seed(3)
+train2 <- sample(1:nrow(df.train), size=(0.7*nrow(df.train)))
+trainSet2 <- df.train[train2, -1]
+testSet2 <- df.train[-train2, -1]
+#first, use old bagging model to predict new test set
+bag.mod.pred <- predict(bag.mod, newdata=testSet2)
+mse14 <- mean((bag.mod.pred-testSet2$price)^2)
+mse12; mse14
+#as you can see, this MSE is actually way lower! probably because its being
+#tested on some of the same data it was trained with.
+rf.pred <- predict(rf.mod, testSet2)
+mse15 <- mean((testSet2$price-rf.pred)^2)
+mse13; mse15
+#The MSE of the randomforest model is actually HIGHER with the new test set!
+#curious.... Very weird and problematic result, especially as it performs worse
+#than the baseline model.
+p <- ncol(trainSet2)-1
+bag.mod2 <- randomForest(price~., data=trainSet2, mtry=p, importance=TRUE, ntree=1000)
+bag.mod2
+bag.mod.pred <- predict(bag.mod2, newdata=testSet2)
+mse16 <- mean((bag.mod.pred-testSet2$price)^2)
+importance(bag.mod2); importance(bag.mod)
+#some conflict in terms of variable importance.
+mse12; mse16
+#The bagging model with a new train test split is WORSE than the model with 
+#every variable!!!
+MSElist <- c(1:p)
+for(i in 1:p){
+rf.mod <- randomForest(price~., data=trainSet2, mtry=i, ntree=1000, importance=T)
+rf.pred <- predict(rf.mod, testSet2)
+MSElist[i]<- mean((testSet2$price-rf.pred)^2)
+}
+bestmtry<- which(MSElist==min(MSElist), arr.ind=TRUE); bestmtry
+#the best mtry=3.
+rf.mod2 <- randomForest(price~., data=trainSet2, mtry=bestmtry, ntree=1000, importance=T)
+importance(rf.mod); importance(rf.mod2)
+#plot(MSElist)
+rf.pred <- predict(rf.mod2, testSet2)
+mse17 <- mean((testSet2$price-rf.pred)^2)
+mse13; mse17
+#still some differences in varaible importance! The best mtry in this case
+#is 3, it used to be 5. And variable importance changes as well.
+#lets address something. Perhaps the new seed and the new train/test set are
+#affecting the MSEs greatly. What's the new baseline in the context of the new
+#training set?
+lm.simplelinear2 <- lm(price~., data=trainSet2)
+lm.pred <- predict(lm.simplelinear2, testSet2)
+mse18 <- mean((testSet2$price-lm.pred)^2)
+#let's compare MSEs.
+#new baseline vs new bagging:
+mse18; mse16
+#new baseline vs new RF
+mse18; mse17
+#new rf still vastly outperforms new baseline, while the new
+#bagging actually performed WORSE than the new baseline.
+#it looks like rf is the correct model to use for minimum MSE,
+#but what mtry? what variables are important? Tricky...
+```
+
+##    Final investigation: Polynomial model vs randomforest: MSE reduction from baseline, variable importance, and what model is best?  
+
+```{r}
+set.seed(3)
+#the best degree is chosen by the lowest RMSE of a model containing only
+#price and the variable in question. This is a constant, and will NOT
+#be tweaked each time by cross validation.
+msepoly <- c(1:10)
+mserf <- c(1:10)
+msebaseline <- c(1:10)
+importancepoly <- list()
+importancerf <-list()
+#we are going to build a polynomial, RF, and simple linear model on 10 separate train/test splits.
+#record the test MSE. Record variable importance (if possible).
+#examine discrepancies and determine the best model to use.
+for(i in 1:10){
+  #new train/test split:
+  train2 <- sample(1:nrow(df.train), size=(0.7*nrow(df.train)))
+  trainSet2 <- df.train[train2, -1]
+  testSet2 <- df.train[-train2, -1]
+  #new baseline model and baseline MSE:
+  lm.simplelinear2 <- lm(price~., data=trainSet2)
+  lm.pred <- predict(lm.simplelinear2, testSet2)
+  msebaseline[i] <- mean((testSet2$price-lm.pred)^2)
+  #new polynomial model and polyomial MSE:
+  lm.poly2 <- lm(price~desc+exteriorfinish+rooftype+lotarea+state+poly(bathrooms, bestDegreeBathrooms)+poly(sqft, bestDegreeSqft)+poly(AvgIncome, bestDegreeAvgIncome)+poly(bedrooms, bestDegreeBedrooms), data=trainSet2)
+  lm.pred <- predict(lm.poly2, testSet2)
+  msepoly[i] <- mean((lm.pred-testSet2$price)^2)
+  importancepoly[[i]] <- summary(lm.poly2)
+  #new RF model with best mtry chosen by cv and the mse:
+  MSElist <- c(1:10)
+  for(j in 1:p){
+    rf.mod <- randomForest(price~., data=trainSet2, mtry=i, ntree=500, importance=T)
+    rf.pred <- predict(rf.mod, testSet2)
+    MSElist[j]<- mean((testSet2$price-rf.pred)^2)
+        } #end of mtry cross validation for loop.
+  bestmtry<- which(MSElist==min(MSElist), arr.ind=TRUE)
+  rf.mod2 <- randomForest(price~., data=trainSet2, mtry=bestmtry, ntree=500, importance=T)
+  rf.pred <- predict(rf.mod2, testSet2)
+  mserf[i] <- mean((testSet2$price-rf.pred)^2)
+  importancerf[[i]] <- importance(rf.mod2)
+}
+#The purpose of this experiment was to ensure that for multiple random test/train
+#splits, polynomial models and RF both outperform the baseline. The purpose is also to
+#Compare the two methods and see if variable importance fluctuates greatly with the 
+#randomness of the train/test split.
+#
+#These 2 variables represent the baseline MSE - the other model MSE.
+#A HIGHER value means that the model significantly outperformed baseline
+#and a NEGATIVE value means that the model is WORSE than baseline.
+rfmsediff <- msebaseline-mserf
+polymsediff <- msebaseline-msepoly
+rfmsediff
+polymsediff
+importancerf[[7]]
+#very low importance for sqft in this model! Most likely why it was so off.
+``` 
+
+```{r}
+median(df.train$price[which(df.train$state=="VA")])
+median(df.train$price[which(df.train$state=="PA")])
+```
+
+##    Dealing with the removed observations and making predictions
+
+```{r}
+set.seed(0)
+#In this part, I am going to make the predictions.
+#after dealing with the fact that we trained a model without all the observations.
+#desc and exteriorfinish have values mobile home and concrete. We removed the observations that have concrete and mobilehome from the training set. 
+df.trainfinal <-read.csv(file="train.csv", header=TRUE)
+df.testfinal <-read.csv(file="test.csv", header=TRUE)
+#repeat the data cleaning done earlier:
+df.trainfinal$basement <- as.factor(df.trainfinal$basement)
+df.testfinal$basement <- as.factor(df.testfinal$basement)
+df.trainfinal <- df.trainfinal[,-12]
+df.testfinal <- df.testfinal[,-12]
+df.trainfinal <- df.trainfinal[,-c(9,15)]
+df.testfinal <- df.testfinal[,-c(9,15)]
+#Now we have our final df.train and df.test!
+#we have our method of predicting price on 597 observations. But what about
+#The other 3? For simplicity sake, we will simply use the mean predicted home price
+#To fill in the value. This will lead to some error, which is
+#not a great practice, but unfortunately I didn't understand the 
+#idea that we had to predict ALL 600 observations so I built all my models in a poor way.
+#oops!
+#
+#Here's the original RF from above:
+MSElist <- c(1:p)
+for(i in 1:p){
+rf.mod <- randomForest(price~., data=trainSet, mtry=i, ntree=1000, importance=T)
+rf.pred <- predict(rf.mod, testSet)
+MSElist[i]<- mean((testSet$price-rf.pred)^2)
+}
+bestmtry<- which(MSElist==min(MSElist), arr.ind=TRUE); bestmtry
+#the best mtry=5.
+rf.mod <- randomForest(price~., data=trainSet, mtry=bestmtry, ntree=1000, importance=T)
+importance(rf.mod)
+#predict on original df.test
+rf.pred <- predict(rf.mod, df.test)
+#Now we have predictions stored in rf.pred.
+#I'm going to make df.test3 bc im scared of messing something up
+df.test3 <- df.test
+df.test3$price <- rf.pred
+fivenum(df.test3$price)
+fivenum(df.train$price)
+#5 number summary looks reasonable compared to 
+#the training set.
+mean(df.test3$price)
+#But wait! We have 3 missing observations! Let's deal with it.
+df.test3 <- df.test3[,c(1,2)] #select ONLY ID AND PRICE!
+finalPredictions <- merge(df.testfinal, df.test3, by="id", all.x=T)
+finalPredictions <- finalPredictions[,c(1,15)] #select only price.y and id!
+#Where the 3 values are NA, replace w the mean of predictions!
+finalPredictions$price.y[which(is.na(finalPredictions$price.y), arr.ind=T)] <- mean(df.test3$price)
+#add id
+student_id <- rep(4342903, times=600)
+finalPredictions <- finalPredictions %>%
+  rename(price=price.y)
+finalPredictions <- cbind(finalPredictions, student_id)
+write.csv(finalPredictions, file="testing_predictions_4342903.csv")
+mean(df.train$price)
+length(which(df.train$price>=857821))
+pred2 <- predict(rf.mod, testSet)
+#plot of predicted home price on y axis and actual on X axis
+plot(testSet$price, pred2)
+#MSE for homes predicted to be worth 500,000 or less.
+mean((pred2[which(pred2 <= 500000)]-testSet$price[which(pred2 <= 500000)])^2)
+```
